@@ -37,3 +37,4 @@ func Error(ctx *breeze.Context, statusCode int, message string, errDetail interf
 		Error:   errStr,
 	})
 }
+

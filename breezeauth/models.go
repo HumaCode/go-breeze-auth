@@ -24,12 +24,15 @@ func (b *BaseModel) BeforeCreate(tx *gorm.DB) error {
 // User entity matching standard ecosystem conventions (compatible with go-rbac-menu)
 type User struct {
 	BaseModel
-	Username        string     `gorm:"type:varchar(50);uniqueIndex;not null" json:"username"`
-	Email           string     `gorm:"type:varchar(100);uniqueIndex;not null" json:"email"`
-	PasswordHash    string     `gorm:"type:varchar(255);not null" json:"-"`
-	Name            string     `gorm:"type:varchar(100);not null" json:"name"`
-	EmailVerifiedAt *time.Time `gorm:"index" json:"email_verified_at,omitempty"`
-	IsActive        int        `gorm:"type:smallint;default:1;not null;index" json:"is_active"` // 1 = active, 0 = inactive
+	Username            string     `gorm:"type:varchar(50);uniqueIndex;not null" json:"username"`
+	Email               string     `gorm:"type:varchar(100);uniqueIndex;not null" json:"email"`
+	PasswordHash        string     `gorm:"type:varchar(255);not null" json:"-"`
+	Name                string     `gorm:"type:varchar(100);not null" json:"name"`
+	EmailVerifiedAt     *time.Time `gorm:"index" json:"email_verified_at,omitempty"`
+	IsActive            int        `gorm:"type:smallint;default:1;not null;index" json:"is_active"` // 1 = active, 0 = inactive
+	FailedLoginAttempts int        `gorm:"type:int;default:0;not null" json:"failed_login_attempts"`
+	SuspendedUntil      *time.Time `gorm:"index" json:"suspended_until,omitempty"`
+	SuspendReason       string     `gorm:"type:varchar(255);default:''" json:"-"` // Tersembunyi dari JSON publik, hanya bisa dilihat role dev
 }
 
 func (User) TableName() string {

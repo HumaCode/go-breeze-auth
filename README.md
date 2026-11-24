@@ -16,7 +16,12 @@ Proyek ini dirancang dengan **Dual Mode**:
 ## 🚀 Fitur Unggulan
 
 - **Identitas & Kunci Primer ULID:** Identifier 26-karakter yang terurut berdasarkan waktu (*time-ordered*).
-- **Fleksibilitas Login:** Login dapat menggunakan **Email** maupun **Username**.
+- **Fleksibilitas Login & Remember Me:** Login dapat menggunakan **Email** maupun **Username**, serta dilengkapi fitur checkbox `remember_me` untuk memperpanjang masa aktif JWT (misal 30 hari vs 24 jam).
+- **Proteksi XSS & Keamanan Input:** Sanitasi otomatis semua input teks (nama, username) menggunakan escaping HTML untuk mencegah injeksi *Stored XSS*.
+- **Anti-Brute Force Throttling & Suspend 10 Menit:**
+  - Jika salah memasukkan kredensial sebanyak **3 kali berturut-turut**, akun otomatis ditangguhkan (*suspended*) selama **10 menit**.
+  - Menyimpan **keterangan suspend tersembunyi** di database (`json:"-"`) yang aman dan tidak bocor ke publik.
+  - Akun yang di-suspend dapat diaktifkan kembali secara instan oleh role **developer/admin**.
 - **Stateless JWT:** Token JWT HS256 yang aman dengan data klaim user (`user_id`, `email`, `username`).
 - **Alur Forgot & Reset Password:** Token acak yang aman dengan penyimpanan terenkripsi (SHA-256 hash) dan waktu kedaluwarsa otomatis.
 - **Verifikasi Email:** Opsi verifikasi alamat email yang dapat diaktifkan atau dinonaktifkan (`RequireEmailVerification`).
@@ -203,6 +208,8 @@ Server akan otomatis memigrasi database dan berjalan di port `8000`.
 | `PUT` | `/api/v1/auth/password` | Bearer Token | Ubah kata sandi pengguna |
 | `POST` | `/api/v1/auth/resend-verification` | Bearer Token | Kirim ulang email verifikasi |
 | `POST` | `/api/v1/auth/logout` | Bearer Token | Notifikasi logout client |
+| `POST` | `/api/v1/auth/users/:id/unsuspend` | Dev/Admin | Mengaktifkan kembali akun yang kena suspend throttle |
+| `GET` | `/api/v1/auth/users/:id/suspend-details` | Dev/Admin | Melihat detail status dan catatan suspend tersembunyi |
 
 ---
 

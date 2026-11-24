@@ -53,5 +53,10 @@ func SetupRouter(deps *RouterDependencies) *breeze.Router {
 	r.HandleBlocking(breeze.POST, "/api/v1/auth/resend-verification", deps.AuthHandler.ResendVerification, authMw)
 	r.HandleBlocking(breeze.POST, "/api/v1/auth/logout", deps.AuthHandler.Logout, authMw)
 
+	// Dev / Admin Management Endpoints
+	r.HandleBlocking(breeze.POST, "/api/v1/auth/users/:id/unsuspend", deps.AuthHandler.UnsuspendUser, authMw)
+	r.HandleBlocking(breeze.GET, "/api/v1/auth/users/:id/suspend-details", deps.AuthHandler.GetSuspendDetails, authMw)
+
 	return r
 }
+

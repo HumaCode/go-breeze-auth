@@ -44,3 +44,4 @@ func InitDB(cfg *Config) (*gorm.DB, error) {
 	DB = db
 	return db, nil
 }
+

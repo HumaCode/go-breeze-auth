@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -367,4 +368,153 @@ func TestLogMailer(t *testing.T) {
 		t.Fatalf("log mailer send email verification failed: %v", err)
 	}
 }
+
+func TestThrottleAndSuspend10Minutes(t *testing.T) {
+	_, _, svc := setupTestDB(t)
+
+	user, _, err := svc.Register(RegisterRequest{
+		Name:     "Gatot Kaca",
+		Username: "gatot",
+		Email:    "gatot@example.com",
+		Password: "correctpassword",
+	})
+	if err != nil {
+		t.Fatalf("failed to register user: %v", err)
+	}
+
+	// 1st failed attempt
+	_, _, err = svc.Login(LoginRequest{Identifier: user.Username, Password: "wrong1"})
+	if err != ErrInvalidCredentials {
+		t.Fatalf("expected ErrInvalidCredentials on 1st attempt, got: %v", err)
+	}
+
+	// 2nd failed attempt
+	_, _, err = svc.Login(LoginRequest{Identifier: user.Username, Password: "wrong2"})
+	if err != ErrInvalidCredentials {
+		t.Fatalf("expected ErrInvalidCredentials on 2nd attempt, got: %v", err)
+	}
+
+	// 3rd failed attempt -> MUST be suspended
+	_, _, err = svc.Login(LoginRequest{Identifier: user.Username, Password: "wrong3"})
+	if err != ErrAccountSuspended {
+		t.Fatalf("expected ErrAccountSuspended on 3rd attempt, got: %v", err)
+	}
+
+	// 4th attempt with the CORRECT password -> STILL blocked because account is suspended!
+	_, _, err = svc.Login(LoginRequest{Identifier: user.Username, Password: "correctpassword"})
+	if err != ErrAccountSuspended {
+		t.Fatalf("expected ErrAccountSuspended even with correct password during suspend, got: %v", err)
+	}
+
+	// Check suspend details as Dev
+	info, err := svc.GetSuspendDetails(user.ID)
+	if err != nil {
+		t.Fatalf("failed to get suspend details: %v", err)
+	}
+	if !info.IsSuspended {
+		t.Errorf("expected user to be suspended")
+	}
+	if info.SuspendReason == "" {
+		t.Errorf("expected hidden suspend reason to be filled")
+	}
+	if info.RemainingSeconds <= 0 {
+		t.Errorf("expected positive remaining seconds")
+	}
+
+	// Role dev unsuspends user
+	err = svc.UnsuspendUser(user.ID)
+	if err != nil {
+		t.Fatalf("failed to unsuspend user: %v", err)
+	}
+
+	// Login with correct password now succeeds
+	loggedIn, token, err := svc.Login(LoginRequest{Identifier: user.Username, Password: "correctpassword"})
+	if err != nil {
+		t.Fatalf("login should succeed after dev unsuspend: %v", err)
+	}
+	if loggedIn.ID != user.ID || token == "" {
+		t.Errorf("login response invalid after unsuspend")
+	}
+}
+
+func TestRememberMeTokenDuration(t *testing.T) {
+	_, _, svc := setupTestDB(t)
+
+	user, _, err := svc.Register(RegisterRequest{
+		Name:     "Hani",
+		Username: "hani",
+		Email:    "hani@example.com",
+		Password: "password123",
+	})
+	if err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+
+	// Normal Login (RememberMe: false) -> duration 2h (from setupTestDB)
+	_, tokenNormal, err := svc.Login(LoginRequest{
+		Identifier: user.Username,
+		Password:   "password123",
+		RememberMe: false,
+	})
+	if err != nil {
+		t.Fatalf("login normal failed: %v", err)
+	}
+
+	claimsNormal, err := ValidateJWT("test-secret-key-123", tokenNormal)
+	if err != nil {
+		t.Fatalf("validate token failed: %v", err)
+	}
+	expNormal := claimsNormal.ExpiresAt.Time
+
+	// RememberMe Login (RememberMe: true) -> duration 30 days
+	_, tokenRemember, err := svc.Login(LoginRequest{
+		Identifier: user.Username,
+		Password:   "password123",
+		RememberMe: true,
+	})
+	if err != nil {
+		t.Fatalf("login remember-me failed: %v", err)
+	}
+
+	claimsRemember, err := ValidateJWT("test-secret-key-123", tokenRemember)
+	if err != nil {
+		t.Fatalf("validate remember-me token failed: %v", err)
+	}
+	expRemember := claimsRemember.ExpiresAt.Time
+
+	if !expRemember.After(expNormal.Add(24 * time.Hour)) {
+		t.Errorf("expected remember me expiration to be significantly longer than normal, normal: %v, remember: %v", expNormal, expRemember)
+	}
+}
+
+func TestXSSProtection(t *testing.T) {
+	_, _, svc := setupTestDB(t)
+
+	rawXSS := "<script>alert('pwned')</script>"
+	user, _, err := svc.Register(RegisterRequest{
+		Name:     rawXSS,
+		Username: "cleanusername",
+		Email:    "xss@example.com",
+		Password: "password123",
+	})
+	if err != nil {
+		t.Fatalf("register failed: %v", err)
+	}
+
+	if strings.Contains(user.Name, "<script>") {
+		t.Errorf("expected raw script tags to be escaped, got: %s", user.Name)
+	}
+
+	// Test Update Profile XSS
+	updated, err := svc.UpdateProfile(user.ID, UpdateProfileRequest{
+		Name: "<img src=x onerror=alert(1)>",
+	})
+	if err != nil {
+		t.Fatalf("update profile failed: %v", err)
+	}
+	if strings.Contains(updated.Name, "<img") {
+		t.Errorf("expected raw html tags to be escaped, got: %s", updated.Name)
+	}
+}
+
 

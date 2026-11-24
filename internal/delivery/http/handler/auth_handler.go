@@ -59,6 +59,9 @@ func (h *AuthHandler) Login(ctx *breeze.Context) error {
 	user, token, err := h.svc.Login(req)
 	if err != nil {
 		statusCode := http.StatusUnauthorized
+		if errors.Is(err, breezeauth.ErrAccountSuspended) {
+			return response.Error(ctx, http.StatusTooManyRequests, "Akun Anda sedang ditangguhkan selama 10 menit karena 3 kali salah memasukkan username/password. Silakan tunggu atau hubungi developer.", nil)
+		}
 		if errors.Is(err, breezeauth.ErrUserInactive) || errors.Is(err, breezeauth.ErrEmailUnverified) {
 			statusCode = http.StatusForbidden
 		}
@@ -188,4 +191,33 @@ func (h *AuthHandler) UpdatePassword(ctx *breeze.Context) error {
 // Logout clears the session/token acknowledgment
 func (h *AuthHandler) Logout(ctx *breeze.Context) error {
 	return response.Success(ctx, http.StatusOK, "Logged out successfully. Please discard your client token.", nil)
+}
+
+// UnsuspendUser reactivates a suspended user account (untuk role dev / admin)
+func (h *AuthHandler) UnsuspendUser(ctx *breeze.Context) error {
+	targetUserID := ctx.Param("id")
+	if targetUserID == "" {
+		return response.Error(ctx, http.StatusBadRequest, "User ID is required", nil)
+	}
+
+	if err := h.svc.UnsuspendUser(targetUserID); err != nil {
+		return response.Error(ctx, http.StatusBadRequest, err.Error(), nil)
+	}
+
+	return response.Success(ctx, http.StatusOK, "User account unsuspended successfully and reactivated", nil)
+}
+
+// GetSuspendDetails returns detailed suspend information with hidden reason for dev
+func (h *AuthHandler) GetSuspendDetails(ctx *breeze.Context) error {
+	targetUserID := ctx.Param("id")
+	if targetUserID == "" {
+		return response.Error(ctx, http.StatusBadRequest, "User ID is required", nil)
+	}
+
+	details, err := h.svc.GetSuspendDetails(targetUserID)
+	if err != nil {
+		return response.Error(ctx, http.StatusNotFound, err.Error(), nil)
+	}
+
+	return response.Success(ctx, http.StatusOK, "Suspend details retrieved successfully", details)
 }

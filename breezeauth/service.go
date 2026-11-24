@@ -3,6 +3,7 @@ package breezeauth
 import (
 	"errors"
 	"fmt"
+	"html"
 	"net/url"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ var (
 	ErrUserNotFound           = errors.New("user not found")
 	ErrInvalidCredentials      = errors.New("invalid identifier or password")
 	ErrUserInactive           = errors.New("account is inactive")
+	ErrAccountSuspended       = errors.New("account is temporarily suspended due to multiple failed login attempts")
 	ErrEmailUnverified        = errors.New("email address has not been verified")
 	ErrUsernameTaken          = errors.New("username is already taken")
 	ErrEmailTaken             = errors.New("email is already registered")
@@ -33,6 +35,20 @@ type RegisterRequest struct {
 type LoginRequest struct {
 	Identifier string `json:"identifier"` // Email or Username
 	Password   string `json:"password"`
+	RememberMe bool   `json:"remember_me"` // Jika true, durasi token diperpanjang (default 30 hari)
+}
+
+// SuspendInfo detail status suspend untuk role dev / admin
+type SuspendInfo struct {
+	UserID              string     `json:"user_id"`
+	Username            string     `json:"username"`
+	Email               string     `json:"email"`
+	IsActive            int        `json:"is_active"`
+	IsSuspended         bool       `json:"is_suspended"`
+	SuspendedUntil      *time.Time `json:"suspended_until,omitempty"`
+	RemainingSeconds    int64      `json:"remaining_seconds,omitempty"`
+	FailedLoginAttempts int        `json:"failed_login_attempts"`
+	SuspendReason       string     `json:"suspend_reason"` // Keterangan tersembunyi
 }
 
 type ForgotPasswordRequest struct {
@@ -93,8 +109,9 @@ func New(db *gorm.DB, cfg ...Config) *Service {
 
 // Register registers a new user, hashes the password, and returns the user & JWT token
 func (s *Service) Register(req RegisterRequest) (*User, string, error) {
-	req.Name = strings.TrimSpace(req.Name)
-	req.Username = strings.ToLower(strings.TrimSpace(req.Username))
+	// XSS Sanitization & normalisasi
+	req.Name = html.EscapeString(strings.TrimSpace(req.Name))
+	req.Username = html.EscapeString(strings.ToLower(strings.TrimSpace(req.Username)))
 	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 
 	if req.Name == "" || req.Username == "" || req.Email == "" || req.Password == "" {
@@ -148,7 +165,7 @@ func (s *Service) Register(req RegisterRequest) (*User, string, error) {
 	return user, token, nil
 }
 
-// Login verifies credentials by email or username, checking activation & verification
+// Login verifies credentials by email or username, checking throttling/suspend, activation & verification
 func (s *Service) Login(req LoginRequest) (*User, string, error) {
 	identifier := strings.ToLower(strings.TrimSpace(req.Identifier))
 	if identifier == "" || req.Password == "" {
@@ -164,19 +181,75 @@ func (s *Service) Login(req LoginRequest) (*User, string, error) {
 		return nil, "", err
 	}
 
+	now := time.Now()
+
+	// 1. Cek apakah user sedang dalam status suspend
+	if user.SuspendedUntil != nil {
+		if now.Before(*user.SuspendedUntil) {
+			return nil, "", ErrAccountSuspended
+		}
+		// Masa suspend (misal 10 menit) telah terlewati, pulihkan status suspend otomatis
+		user.SuspendedUntil = nil
+		user.SuspendReason = ""
+		user.FailedLoginAttempts = 0
+		_ = s.db.Save(&user)
+	}
+
+	// 2. Verifikasi Password dengan Throttling (3x gagal -> suspend 10 menit)
 	if !CheckPasswordHash(req.Password, user.PasswordHash) {
+		user.FailedLoginAttempts++
+		maxAttempts := s.config.MaxFailedLoginAttempts
+		if maxAttempts <= 0 {
+			maxAttempts = 3
+		}
+
+		if user.FailedLoginAttempts >= maxAttempts {
+			suspendDuration := s.config.SuspendDuration
+			if suspendDuration <= 0 {
+				suspendDuration = 10 * time.Minute
+			}
+			suspendUntil := now.Add(suspendDuration)
+			user.SuspendedUntil = &suspendUntil
+			// Keterangan suspend tersembunyi yang hanya bisa dilihat role dev
+			user.SuspendReason = fmt.Sprintf("Akun ditangguhkan otomatis oleh sistem: 3x gagal memasukkan password pada %s", now.Format("2006-01-02 15:04:05"))
+			user.FailedLoginAttempts = 0
+			_ = s.db.Save(&user)
+			return nil, "", ErrAccountSuspended
+		}
+
+		_ = s.db.Save(&user)
 		return nil, "", ErrInvalidCredentials
 	}
 
+	// 3. Cek apakah user aktif
 	if user.IsActive == 0 {
 		return nil, "", ErrUserInactive
 	}
 
+	// 4. Cek email verification jika diaktifkan
 	if s.config.RequireEmailVerification && user.EmailVerifiedAt == nil {
 		return nil, "", ErrEmailUnverified
 	}
 
-	token, err := GenerateJWT(s.config.JWTSecret, &user, s.config.JWTExpiration)
+	// 5. Login berhasil: reset counter gagal login & bersihkan catatan suspend
+	if user.FailedLoginAttempts > 0 || user.SuspendedUntil != nil || user.SuspendReason != "" {
+		user.FailedLoginAttempts = 0
+		user.SuspendedUntil = nil
+		user.SuspendReason = ""
+		_ = s.db.Save(&user)
+	}
+
+	// 6. Tentukan durasi token berdasarkan RememberMe
+	jwtDuration := s.config.JWTExpiration
+	if req.RememberMe {
+		if s.config.JWTRememberMeExpiration > 0 {
+			jwtDuration = s.config.JWTRememberMeExpiration
+		} else {
+			jwtDuration = 30 * 24 * time.Hour
+		}
+	}
+
+	token, err := GenerateJWT(s.config.JWTSecret, &user, jwtDuration)
 	if err != nil {
 		return nil, "", err
 	}
@@ -341,15 +414,15 @@ func (s *Service) GetProfile(userID string) (*User, error) {
 	return &user, nil
 }
 
-// UpdateProfile updates basic details (name, username, email)
+// UpdateProfile updates basic details (name, username, email) with XSS sanitization
 func (s *Service) UpdateProfile(userID string, req UpdateProfileRequest) (*User, error) {
 	user, err := s.GetProfile(userID)
 	if err != nil {
 		return nil, err
 	}
 
-	req.Name = strings.TrimSpace(req.Name)
-	req.Username = strings.ToLower(strings.TrimSpace(req.Username))
+	req.Name = html.EscapeString(strings.TrimSpace(req.Name))
+	req.Username = html.EscapeString(strings.ToLower(strings.TrimSpace(req.Username)))
 	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 
 	if req.Name != "" {
@@ -405,5 +478,53 @@ func (s *Service) UpdatePassword(userID string, req UpdatePasswordRequest) error
 	}
 
 	return s.db.Model(&User{}).Where("id = ?", userID).Update("password_hash", newHash).Error
+}
+
+// UnsuspendUser reactivates a suspended user account (dapat dipanggil oleh role dev/admin)
+func (s *Service) UnsuspendUser(userID string) error {
+	var user User
+	if err := s.db.First(&user, "id = ?", userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrUserNotFound
+		}
+		return err
+	}
+
+	user.SuspendedUntil = nil
+	user.SuspendReason = ""
+	user.FailedLoginAttempts = 0
+	user.IsActive = 1
+
+	return s.db.Save(&user).Error
+}
+
+// GetSuspendDetails returns detailed suspension information including the hidden reason (khusus role dev)
+func (s *Service) GetSuspendDetails(userID string) (*SuspendInfo, error) {
+	var user User
+	if err := s.db.First(&user, "id = ?", userID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, err
+	}
+
+	now := time.Now()
+	isSuspended := user.SuspendedUntil != nil && now.Before(*user.SuspendedUntil)
+	var remainingSecs int64
+	if isSuspended {
+		remainingSecs = int64(time.Until(*user.SuspendedUntil).Seconds())
+	}
+
+	return &SuspendInfo{
+		UserID:              user.ID,
+		Username:            user.Username,
+		Email:               user.Email,
+		IsActive:            user.IsActive,
+		IsSuspended:         isSuspended,
+		SuspendedUntil:      user.SuspendedUntil,
+		RemainingSeconds:    remainingSecs,
+		FailedLoginAttempts: user.FailedLoginAttempts,
+		SuspendReason:       user.SuspendReason,
+	}, nil
 }
 
